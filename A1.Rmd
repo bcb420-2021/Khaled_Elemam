@@ -1,0 +1,370 @@
+---
+title: "Assignment 1 - Data set selection and initial processing"
+author: "Khaled Elemam"
+output:
+  html_document:
+    df_print: paged
+---
+##### Note: The code used in this assignment is adopted from BCB420 Winter 2021 lectures 3 to 5.
+
+#### Install and load required libraries for the workflow.
+```{r echo=TRUE, message=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("GEOmetadb", quietly = TRUE))  BiocManager::install("GEOmetadb")
+if (!requireNamespace("edgeR", quietly = TRUE))     BiocManager::install("edgeR")
+if (!requireNamespace("biomaRt", quietly = TRUE))  BiocManager::install("biomaRt")
+if (!requireNamespace("tidyverse", quietly = TRUE)) install.packages("tidyverse")     
+if (!requireNamespace("gdtools", quietly = TRUE))    install.packages("gdtools")   
+if (!requireNamespace("kableExtra", quietly = TRUE))  install.packages("kableExtra")   
+if (!requireNamespace("data.table", quietly = TRUE))  install.packages("data.table")   
+
+library(knitr)
+library(GEOmetadb)
+library(edgeR)
+library(biomaRt) 
+library(dplyr)
+library(kableExtra)
+library(data.table)
+```
+
+# 1. Data exploration
+
+
+#### 1.1 GEO description of the dataset:
+```{r echo=TRUE, message=FALSE}
+gse <- getGEO("GSE151879",GSEMatrix=FALSE)
+```
+```{r}
+kable(data.frame(head(Meta(gse))), format = "html")   
+```
+
+
+#### 1.2 Information about the platform:
+```{r, message=FALSE}
+current_gpl <- names(GPLList(gse))[1]
+current_gpl_info <- Meta(getGEO(current_gpl))
+```
+**Platform title** : `r current_gpl_info$title `  
+**GEO accession** : `r current_gpl_info$geo_accession `  
+**Submission date** : `r current_gpl_info$submission_date `  
+**Last update date** : `r current_gpl_info$last_update_date `  
+**Organism** : `r current_gpl_info$organism `  
+**Number of GEO datasets that use this techology** : `r length(current_gpl_info$series_id) `  
+**Number of GEO samples that use this technology** : `r length(current_gpl_info$sample_id) `    
+
+
+#### 1.3 Get the expression data:
+```{r}
+sub_dir <- "GSE151879"   
+p <-file.path(getwd(), sub_dir)
+
+#if the data exists no need to download it again
+if (dir.exists(p)){
+  setwd(p)
+  Adult_path <- "GSE151879_raw_counts_genes.Adult_human_cardiomyocytes.txt.gz"
+  Macrophages_path <- "GSE151879_raw_counts_genes.Macrophages.txt.gz"
+  hESC_path <- "GSE151879_raw_counts_genes.hESC-derived_cardiomyocytes.txt.gz"
+  
+  Adult_human_CM = read.delim(Adult_path,header=TRUE,check.names = FALSE)
+  Macrophages = read.delim(Macrophages_path,header=TRUE,check.names = FALSE)
+  hESC_CM = read.delim (hESC_path,header=TRUE,check.names = FALSE)
+  
+} else{
+  
+  sfiles = getGEOSuppFiles("GSE151879")
+  fnames = rownames(sfiles)
+  
+  # there are three supplemental files
+  Adult_human_CM = read.delim(fnames[1],header=TRUE,check.names = FALSE)
+  Macrophages = read.delim(fnames[2],header=TRUE,check.names = FALSE)
+  hESC_CM = read.delim(fnames[3],header=TRUE,check.names = FALSE)
+
+}
+
+kable(Adult_human_CM[1:5,], format = "html")
+kable(Macrophages[1:5,], format = "html")
+kable(hESC_CM[1:5,], format = "html")
+```
+         
+#### Note: Out of the 3 experiments/files I chose the Adult human cardiomayocytes dataset for my analysis.    
+
+#### 1.4 Overview statistics for dataset:
+```{r}
+dim(Adult_human_CM)
+colnames(Adult_human_CM)
+summary(Adult_human_CM)
+
+```
+
+```{r include=FALSE}
+dim(Adult_human_CM)
+#dim(Macrophages)
+#dim(hESC_CM)
+
+colnames(Adult_human_CM)
+#colnames(Macrophages)
+#colnames(hESC_CM)
+
+summarized_gene_counts <- sort(table(Adult_human_CM$gene_id),decreasing = TRUE)
+#summarized_gene_counts
+kable(table(Adult_human_CM$gene_id)[1:3], format="html")
+kable(summarized_gene_counts[which(Adult_human_CM$gene_id>1)[1:10]],)
+## ask about no duplicates
+```
+#### 1.5 Filter weakly expressed features
+```{r}
+#translate out counts into counts per million using the edgeR package
+cpms = cpm(Adult_human_CM[,2:7])
+rownames(cpms) <- Adult_human_CM[,1]
+# get rid of low counts
+keep = rowSums(cpms >1) >=3
+Adult_human_CM_filtered = Adult_human_CM[keep,]
+dim(Adult_human_CM_filtered)
+```
+
+
+#### 1.6 Define the groups 
+```{r}
+samples <- data.frame(lapply(colnames(Adult_human_CM_filtered)[2:7],      
+                             FUN=function(x){unlist(strsplit(x, split = "\\_"))[c(4,5)]})) 
+colnames(samples) <- colnames(Adult_human_CM_filtered)[2:7] 
+rownames(samples) <- c("condition","number")
+samples <- data.frame(t(samples))
+samples
+
+```
+
+# 2. Identifier mapping
+
+#### 2.1 Connect to ensemble mart and limit to humans dataset
+
+```{r}
+
+ensembl <- useMart("ensembl")
+ensembl = useDataset("hsapiens_gene_ensembl",mart=ensembl)
+
+```
+
+```{r include=FALSE}
+
+#dim(listFilters(ensembl))
+#kable(listFilters(ensembl)[1:10,1:2], type="html")
+
+
+#listMarts()
+datasets <- listDatasets(ensembl) 
+kable(head(datasets),format = "html")
+kable(head(datasets[grep(datasets$dataset,               
+                         pattern = "sapiens"),]),format = "html")
+
+
+biomart_human_filters <- listFilters(ensembl) 
+kable(biomart_human_filters[ grep(biomart_human_filters$name,pattern="ensembl"),],    
+      format="html") %>%   
+  row_spec(3, background = "yellow")
+
+kable(listAttributes(ensembl)[1:10,1:2], type="html")
+
+kable(searchAttributes(mart = ensembl, 'hgnc') , format="html") %>% 
+  row_spec(2, background = "yellow")
+
+kable(searchAttributes(mart = ensembl, 'ensembl|hgnc')[1:12,] ,    
+      format="html") %>%   row_spec(c(1,11), background = "yellow")
+
+
+
+```
+
+#### 2.2  Map human ensemble IDs to hgnc symbols
+```{r}
+
+conversion_stash <- "Adult_human_CM_id_conversion.rds"
+if (file.exists(conversion_stash)) {  
+  Adult_human_CM_id_conversion<- readRDS(conversion_stash) 
+} else {   
+    Adult_human_CM_id_conversion <- getBM(attributes = c("ensembl_gene_id","hgnc_symbol"),                
+    filters = c("ensembl_gene_id"),                             
+    values = Adult_human_CM_filtered$gene_id,                  
+    mart = ensembl)   
+    
+    saveRDS(Adult_human_CM_id_conversion, conversion_stash)
+}
+```
+
+#### 2.3 Check for duplicates
+```{r}
+#check duplicates
+summarized_gene_counts <- sort(table(Adult_human_CM_id_conversion$hgnc_symbol),decreasing = TRUE)
+kable(table(Adult_human_CM_id_conversion$hgnc_symbol)[1:3], format="html")
+kable(summarized_gene_counts[which(Adult_human_CM_id_conversion$hgnc_symbol>1)[1:10]],)
+
+```
+#### 2.4 Merge mapped data frame with original filtered data frame
+```{r}
+# use data.table because it is much faster
+colnames(Adult_human_CM_id_conversion) <- c("gene_id", "hgnc_symbol")
+data_table_1 = data.table(Adult_human_CM_filtered, key="gene_id")
+data_table_2 = data.table(Adult_human_CM_id_conversion, key="gene_id")
+
+dt.merged <- merge(data_table_1, data_table_2, all = T)
+```
+
+```{r}
+#reorder data frame
+dt.merged <- dt.merged[, c(1,8,2,3,4,5,6,7)]
+kable(dt.merged[1:5,],type = "html")
+```
+
+#### 2.5 Number of identifiers missing
+
+##### I have 253 ids missing (NA) and 372 ids not mapped (empty string)
+```{r}
+ensembl_id_missing_gene <- dt.merged$gene_id[which(is.na(dt.merged$hgnc_symbol))]
+ensembl_id_not_mapped <- dt.merged$gene_id[which(dt.merged$hgnc_symbol == "")]
+length(ensembl_id_missing_gene)
+length(ensembl_id_not_mapped)
+```
+```{r}
+# View snippet of missing identifiers
+kable(dt.merged[which(is.na(dt.merged$hgnc_symbol))][1:5])
+kable(dt.merged[which(dt.merged$hgnc_symbol == "")][1:5])
+
+```
+#### Note: I am unable to make hgnc symbols to be defined as rownames of the dataframe because because they are not unique due to the presence of unmapped ids.
+
+
+# 3. Normalization
+
+####  3.1 Check the total expression values in the two conditions.
+```{r}
+mean(sum(dt.merged$Adult_human_cardiomyocytes_Mock_1),
+  sum(dt.merged$Adult_human_cardiomyocytes_Mock_2),
+  sum(dt.merged$Adult_human_cardiomyocytes_Mock_3))
+
+mean(sum(dt.merged$`Adult_human_cardiomyocytes_SARS-CoV2_1`),
+  sum(dt.merged$`Adult_human_cardiomyocytes_SARS-CoV2_2`),
+  sum(dt.merged$`Adult_human_cardiomyocytes_SARS-CoV2_3`))
+
+```
+##### Since the average total value between the two conditions is not equal we cannot normalize by library size because according to [Evans et. al Brief. Bioinform, 2018](https://pubmed.ncbi.nlm.nih.gov/28334202/) normalization by library size assumes same total expression.
+
+
+#### 3.2 Applying TMM to dataset 
+##### I chose normalization by distribution using TMM because it adjusts for both library size and library composition.
+
+```{r}
+# Create our DGEList object to be used by edgeR
+filtered_data_matrix <- as.matrix(dt.merged[,3:8]) 
+rownames(filtered_data_matrix) <- dt.merged$gene_id
+d = DGEList(counts=filtered_data_matrix, group =samples$condition )
+
+# Calculate the normalization factors
+d = calcNormFactors(d)
+normalized_counts <- cpm(d)
+```
+#### 3.3 Box plots of the data before and after normalization
+```{r warning=FALSE}
+data2plot <- log2(cpm(dt.merged[,3:8]))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM",        
+        las = 2, cex = 0.5, cex.lab = 0.5,     
+        cex.axis = 0.5, main = "Adult CM RNASeq Samples Pre-Normalization")
+#draw the median on each box plot
+abline(h = median(apply(data2plot, 2, median)),        col = "green", lwd = 0.6, lty = "dashed")
+
+
+data2plot <- log2(normalized_counts[,1:6])
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM",        
+        las = 2, cex = 0.5, cex.lab = 0.5,     
+        cex.axis = 0.5, main = "Adult CM RNASeq Samples Post-Normalization")
+#draw the median on each box plot
+abline(h = median(apply(data2plot, 2, median)),     
+       col = "green", lwd = 0.6, lty = "dashed")
+```
+
+#### 3.4 Density plots before and after normalization.
+
+```{r}
+  counts_density <- apply(log2(cpm(dt.merged[,3:8])), 2, density)
+  #calculate the limits across all the samples     
+  xlim <- 0; ylim <- 0    
+  for (i in 1:length(counts_density)) {     
+    xlim <- range(c(xlim, counts_density[[i]]$x));    
+    ylim <- range(c(ylim, counts_density[[i]]$y))    
+    }
+    cols <- rainbow(length(counts_density))     
+    ltys <- rep(1, length(counts_density))
+    #plot the first density plot to initialize the plot  
+    plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",  
+         ylab="Smoothing density of log2-CPM", main="Denisty Plot Pre-Normalization", cex.lab = 0.8  )
+    #plot each line   
+    for (i in 1:length(counts_density)) lines(counts_density[[i]], col = cols[i])
+    #create legend   
+    legend("topright", colnames(data2plot),    
+           col=cols, lty=ltys, cex=0.75,      
+           border ="blue",  text.col = "green4",       
+           merge = TRUE, bg = "gray90")
+    
+    
+   counts_density <- apply(log2(normalized_counts[,1:6]), 2, density)
+  #calculate the limits across all the samples     
+  xlim <- 0; ylim <- 0    
+  for (i in 1:length(counts_density)) {     
+    xlim <- range(c(xlim, counts_density[[i]]$x));    
+    ylim <- range(c(ylim, counts_density[[i]]$y))    
+    }
+    cols <- rainbow(length(counts_density))     
+    ltys <- rep(1, length(counts_density))
+    #plot the first density plot to initialize the plot  
+    plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",  
+         ylab="Smoothing density of log2-CPM", main="Denisty Plot Post-Normalization", cex.lab = 0.8  )
+    #plot each line   
+    for (i in 1:length(counts_density)) lines(counts_density[[i]], col = cols[i])
+    #create legend   
+    legend("topright", colnames(data2plot),    
+           col=cols, lty=ltys, cex=0.75,      
+           border ="blue",  text.col = "green4",       
+           merge = TRUE, bg = "gray90")
+```
+
+#### 3.5 MDS plot after normalization.
+
+```{r}
+hold <- vector()
+for (i in 1:nrow(samples)) {
+  lab <-c(samples$condition[i],samples$number[i])
+  hold<- c(hold, paste(lab, collapse = "_") )
+}
+plotMDS(d, labels= hold, 
+        col = c("darkgreen","blue")[factor(samples$condition)]) 
+```
+
+# 4. Interpretation
+
+-What are the control and test conditions of the dataset? 
+
+The controls are healthy adult human cardiomyocytes and the test conditions are adult human cardiomyocytes infected by SARS-CoV2.
+
+-Why is the dataset of interest to you?   
+
+SARS-CoV2 is very relevant right now and its effects on us is not fully understood. I want to contribute to potential novel discoveries of how SARS-CoV2 affects our bodies.
+
+Were there expression values that were not unique for specific genes? How did you handle these?  
+
+No. From the successfully mapped ids I had no duplicate hgnc symbols.
+
+-Were there expression values that could not be mapped to current HUGO symbols?  
+
+Yes, I have 625 in total (253 with "NA" and 372 with an empty string). I chose to keep them because I do not think that not being able to map them is a good enough reason to discard them.
+
+-How many outliers were removed?  
+
+After the inital cpm filer the data set went from 57916 to 13200 rows so 44716 in total were discarded.    
+
+-How did you handle replicates?    
+
+I had no replicates/duplicates other than the gene ids that were not successfully mapped to hgnc symbols.    
+ 
+-What is the final coverage of your dataset?    
+
+13200 genes with 625 missing hgnc symbols. 
+
